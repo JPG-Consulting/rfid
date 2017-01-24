@@ -216,6 +216,8 @@ void MFRC522::PCD_Init() {
 	// Reset baud rates
 	PCD_WriteRegister(TxModeReg, 0x00);
 	PCD_WriteRegister(RxModeReg, 0x00);
+	// Reset RxSelReg
+	PCD_WriteRegister(RxSelReg, 0x84);
 
 	// When communicating with a PICC we need a timeout if something goes wrong.
 	// f_timer = 13.56 MHz / (2*TPreScaler+1) where TPreScaler = [TPrescaler_Hi:TPrescaler_Lo].
@@ -445,6 +447,8 @@ MFRC522::StatusCode MFRC522::PCD_CommunicateWithPICC(	byte command,		///< The co
 		PCD_SetRegisterBitMask(BitFramingReg, 0x80);	// StartSend=1, transmission of data starts
 	}
 	
+	delay(5);
+
 	// Wait for the command to complete.
 	// In PCD_Init() we set the TAuto flag in TModeReg. This means the timer automatically starts when the PCD stops transmitting.
 	// Each iteration of the do-while-loop takes 17.86μs.
@@ -468,6 +472,8 @@ MFRC522::StatusCode MFRC522::PCD_CommunicateWithPICC(	byte command,		///< The co
 	if (errorRegValue & 0x13) {	 // BufferOvfl ParityErr ProtocolErr
 		return STATUS_ERROR;
 	}	
+
+	delay(5);
 
 	// If the caller wants data back, get it from the MFRC522.
 	if (backData && backLen) {
@@ -819,9 +825,53 @@ MFRC522::StatusCode MFRC522::PICC_Select(	Uid *uid,			///< Pointer to Uid struct
 					//  0 | 0 | 0 | Only 106 kBaud is supported
 					//
 					// Note: 106 kBaud is always supported
-					//
-					// I have almost constant timeouts when changing speeds :(
-					PICC_PPS(BITRATE_106KBITS, BITRATE_106KBITS);
+
+					TagBitRates ds;
+					TagBitRates dr;
+
+					// DS
+					if ((ats.ta1.ds & 0x04) && (_maxBitRate == BITRATE_848KBITS))
+					{
+						ds = BITRATE_848KBITS;
+					}
+					else if ((ats.ta1.ds & 0x02) && (_maxBitRate == BITRATE_424KBITS))
+					{
+						ds = BITRATE_424KBITS;
+					}
+					else if ((ats.ta1.ds & 0x01) && (_maxBitRate == BITRATE_212KBITS))
+					{
+						ds = BITRATE_212KBITS;
+					}
+					else {
+						ds = BITRATE_106KBITS;
+					}
+
+					// DR
+					if ((ats.ta1.dr & 0x04) && (_maxBitRate == BITRATE_848KBITS))
+					{
+						dr = BITRATE_848KBITS;
+					}
+					else if ((ats.ta1.dr & 0x02) && (_maxBitRate == BITRATE_424KBITS))
+					{
+						dr = BITRATE_424KBITS;
+					}
+					else if ((ats.ta1.dr & 0x01) && (_maxBitRate == BITRATE_212KBITS))
+					{
+						dr = BITRATE_212KBITS;
+					}
+					else {
+						dr = BITRATE_106KBITS;
+					}
+
+					if (!ats.ta1.sameD)
+					{
+						PICC_PPS(ds, dr);
+					}
+					else
+					{
+						// Not sure so leave it standard
+						PICC_PPS(BITRATE_106KBITS, BITRATE_106KBITS);
+					}
 				}
 			}
 		}
@@ -1081,7 +1131,7 @@ MFRC522::StatusCode MFRC522::PICC_PPS()
 		PCD_WriteRegister(TxModeReg, txReg);
 		PCD_WriteRegister(RxModeReg, rxReg);
 	}
-
+	
 	return result;
 } // End PICC_PPS()
 
@@ -1105,18 +1155,17 @@ MFRC522::StatusCode MFRC522::PICC_PPS(TagBitRates sendBitRate,	          ///< DS
 	//  -The lower nibble(b4–b1), which is called the ‘card identifier’ (CID), defines the logical number of the addressed card.
 	ppsBuffer[0] = 0xD0;	// CID is hardcoded as 0 in RATS
 	ppsBuffer[1] = 0x11;	// PPS0 indicates whether PPS1 is present
-
-	// Bit 8 - Set to '0' as MFRC522 allows different bit rates for send and receive
-	// Bit 4 - Set to '0' as it is Reserved for future use.
-	//ppsBuffer[2] = (((sendBitRate & 0x03) << 4) | (receiveBitRate & 0x03)) & 0xE7;
-	ppsBuffer[2] = (((sendBitRate & 0x03) << 2) | (receiveBitRate & 0x03)) & 0xE7;
+	
+	ppsBuffer[2] = (((sendBitRate & 0x03) << 2) | (receiveBitRate & 0x03)) & 0x0F;
 
 	// Calculate CRC_A
 	result = PCD_CalculateCRC(ppsBuffer, 3, &ppsBuffer[3]);
 	if (result != STATUS_OK) {
 		return result;
 	}
-	
+
+	byte rxSelReg;
+
 	// Transmit the buffer and receive the response, validate CRC_A.
 	result = PCD_TransceiveData(ppsBuffer, 5, ppsBuffer, &ppsBufferSize, NULL, 0, true);
 	if (result == STATUS_OK)
@@ -1130,6 +1179,27 @@ MFRC522::StatusCode MFRC522::PICC_PPS(TagBitRates sendBitRate,	          ///< DS
 
 		PCD_WriteRegister(TxModeReg, txReg);
 		PCD_WriteRegister(RxModeReg, rxReg);
+
+		rxSelReg = PCD_ReadRegister(RxSelReg);
+		rxSelReg = 0x3F; // (rxSelReg & 0x3F) | 0xE0;
+		PCD_WriteRegister(RxSelReg, rxSelReg);
+		Serial.print("RxSelReg set to 0x");
+		Serial.println(rxSelReg, HEX);
+
+
+		// Why the heck it does not change???
+		rxSelReg = PCD_ReadRegister(RxSelReg);
+		Serial.print("RxSelReg: ");
+		Serial.println(RxSelReg, HEX);
+
+		// When communicating with a PICC we need a timeout if something goes wrong.
+		// f_timer = 13.56 MHz / (2*TPreScaler+1) where TPreScaler = [TPrescaler_Hi:TPrescaler_Lo].
+		
+		// TPrescaler_Hi are the four low bits in TModeReg. TPrescaler_Lo is TPrescalerReg.
+		//PCD_WriteRegister(TModeReg, 0x80);			// TAuto=1; timer starts automatically at the end of the transmission in all communication modes at all speeds
+		PCD_WriteRegister(TPrescalerReg, 0xA9);		// TPreScaler = TModeReg[3..0]:TPrescalerReg, ie 0x0A9 = 169 => f_timer=40kHz, ie a timer period of 25μs.
+		PCD_WriteRegister(TReloadRegH, 0xFF);		// Reload timer with 0x3E8 = 1000, ie 25ms before timeout.
+		PCD_WriteRegister(TReloadRegL, 0xFF);
 	}
 
 	return result;
@@ -2518,6 +2588,16 @@ bool MFRC522::PICC_IsNewCardPresent() {
 	// Reset baud rates
 	PCD_WriteRegister(TxModeReg, 0x00);
 	PCD_WriteRegister(RxModeReg, 0x00);
+	// Reset RxSelReg
+	PCD_WriteRegister(RxSelReg, 0x84);	// Default seems to be 0x84
+
+	// When communicating with a PICC we need a timeout if something goes wrong.
+	// f_timer = 13.56 MHz / (2*TPreScaler+1) where TPreScaler = [TPrescaler_Hi:TPrescaler_Lo].
+	// TPrescaler_Hi are the four low bits in TModeReg. TPrescaler_Lo is TPrescalerReg.
+	PCD_WriteRegister(TModeReg, 0x80);			// TAuto=1; timer starts automatically at the end of the transmission in all communication modes at all speeds
+	PCD_WriteRegister(TPrescalerReg, 0xA9);		// TPreScaler = TModeReg[3..0]:TPrescalerReg, ie 0x0A9 = 169 => f_timer=40kHz, ie a timer period of 25μs.
+	PCD_WriteRegister(TReloadRegH, 0x03);		// Reload timer with 0x3E8 = 1000, ie 25ms before timeout.
+	PCD_WriteRegister(TReloadRegL, 0xE8);
 
 	MFRC522::StatusCode result = PICC_RequestA(bufferATQA, &bufferSize);
 
